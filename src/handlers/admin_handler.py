@@ -12,6 +12,7 @@ from telebot.apihelper import ApiTelegramException
 from telebot.types import Message
 
 from src.config import logger, _
+from src.version import VERSION
 from src.utils.permissions import (
     DEFAULT_RESTRICTED_REPLY_MESSAGE,
     DISABLE,
@@ -82,7 +83,9 @@ class AdminHandler:
             types.InlineKeyboardButton("📢" + _("Broadcast Message"),
                                        callback_data=json.dumps({"action": "broadcast_message"})),
             types.InlineKeyboardButton("📡" + _("Show Host IP Info"),
-                                       callback_data=json.dumps({"action": "show_host_ip"}))
+                                       callback_data=json.dumps({"action": "show_host_ip"})),
+            types.InlineKeyboardButton("🏷️" + _("Show Version"),
+                                       callback_data=json.dumps({"action": "show_version"}))
         ]
 
         for i in range(0, len(buttons), 2):
@@ -967,12 +970,27 @@ class AdminHandler:
         markup.add(types.InlineKeyboardButton("⬅️" + _("Back"),
                                                 callback_data=json.dumps({"action": "menu"})))
         self.bot.send_message(text=_("Host IP Information") + "\n\n" +
+                                _("Version: {}").format(VERSION) + "\n" +
                                 _("IP Address: {}").format(ip) + "\n" +
                                 _("Country: {}").format(country) + "\n" +
                                 _("City: {}").format(city),
                                 chat_id=message.chat.id,
                                 message_thread_id=None,
                                 reply_markup=markup)
+
+    def show_version(self, message: Message):
+        """Show the embedded application version."""
+        if not self.check_valid_chat(message):
+            return
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("⬅️" + _("Back"),
+                                              callback_data=json.dumps({"action": "menu"})))
+        self.bot.send_message(
+            text=_("Version Information") + "\n\n" + _("Version: {}").format(VERSION),
+            chat_id=message.chat.id,
+            message_thread_id=None,
+            reply_markup=markup,
+        )
 
     def handle_broadcast_message(self, message: Message):
         """Handle broadcast message content."""

@@ -84,6 +84,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
@@ -92,3 +94,4 @@ jobs:
         run: |
           echo "✅ Pushed multi-arch image to GHCR: ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}:latest"
           echo "✅ Pushed multi-arch image to DockerHub: ${{ env.DOCKERHUB_IMAGE_NAME }}:latest"
+          echo "🏷️ Embedded version: ${{ github.ref_name }}"

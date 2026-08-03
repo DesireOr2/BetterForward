@@ -2,6 +2,8 @@ FROM python:3.12-alpine
 
 WORKDIR /app
 
+ARG VERSION=dev
+
 COPY locale /app/locale
 COPY requirements.txt /tmp/requirements.txt
 
@@ -22,5 +24,6 @@ ENV GROUP_ID=""
 ENV LANGUAGE="en_US"
 ENV TG_API=""
 ENV WORKER="2"
+ENV BETTERFORWARD_VERSION=$VERSION
 
 CMD python -u /app/main.py -token "$TOKEN" -group_id "$GROUP_ID" -language "$LANGUAGE" -tg_api "$TG_API" -worker "$WORKER"

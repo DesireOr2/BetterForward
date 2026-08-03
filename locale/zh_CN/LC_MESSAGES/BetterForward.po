@@ -1,3 +1,4 @@
+#
 msgid ""
 msgstr ""
 "Project-Id-Version: BetterForward\n"
@@ -179,6 +180,10 @@ msgstr "消息公告"
 msgid "Show Host IP Info"
 msgstr "查询部署机器IP信息"
 
+#: src/handlers/admin_handler.py:86
+msgid "Show Version"
+msgstr "查看版本"
+
 #: src/handlers/admin_handler.py:80 src/handlers/admin_handler.py:83
 msgid "Menu"
 msgstr "菜单"
@@ -246,7 +251,9 @@ msgid "Invalid regular expression"
 msgstr "正则表达式不合法"
 
 #: src/handlers/admin_handler.py:154
-msgid "Please send the response content. It can be text, stickers, photos and so on."
+msgid ""
+"Please send the response content. It can be text, stickers, photos and so "
+"on."
 msgstr "请发送自动回复的内容。可以是文本，贴纸，图片等类型。"
 
 #: src/handlers/admin_handler.py:168 src/handlers/admin_handler.py:822
@@ -491,7 +498,9 @@ msgstr ""
 "发送 /cancel 取消此操作。"
 
 #: src/handlers/admin_handler.py:635
-msgid "Invalid URL format. Please enter a valid URL starting with http:// or https://"
+msgid ""
+"Invalid URL format. Please enter a valid URL starting with http:// or "
+"https://"
 msgstr "无效的URL格式。请输入以 http:// 或 https:// 开头的有效URL。"
 
 #: src/handlers/admin_handler.py:644
@@ -558,6 +567,15 @@ msgstr "获取IP信息失败"
 msgid "Host IP Information"
 msgstr "部署机器IP信息"
 
+#: src/handlers/admin_handler.py:977
+msgid "Version Information"
+msgstr "版本信息"
+
+#: src/handlers/admin_handler.py:970
+#, python-brace-format
+msgid "Version: {}"
+msgstr "版本：{}"
+
 #: src/handlers/admin_handler.py:764
 #, python-brace-format
 msgid "IP Address: {}"
@@ -622,7 +640,9 @@ msgid "Spam Topic ID: {}"
 msgstr "垃圾消息会话已加载：{}"
 
 #: src/handlers/admin_handler.py:879
-msgid "Messages containing these keywords will be forwarded to the spam topic silently."
+msgid ""
+"Messages containing these keywords will be forwarded to the spam topic "
+"silently."
 msgstr "包含这些关键词的消息将被静默转发到垃圾消息会话。"
 
 #: src/handlers/admin_handler.py:892
@@ -720,7 +740,9 @@ msgid "Not set (no reply will be sent)"
 msgstr "未设置（不会发送回复）"
 
 #: src/handlers/admin_handler.py:1111
-msgid "When enabled, blocked users will receive this message when they try to send messages."
+msgid ""
+"When enabled, blocked users will receive this message when they try to send "
+"messages."
 msgstr "启用后，被拉黑的用户发送消息时将收到此回复。"
 
 #: src/handlers/admin_handler.py:1128
@@ -828,7 +850,9 @@ msgid "Invalid action received"
 msgstr "接收到无效的操作"
 
 #: src/handlers/command_handler.py:50
-msgid "I'm a bot that forwards messages, so please just tell me what you want to say."
+msgid ""
+"I'm a bot that forwards messages, so please just tell me what you want to "
+"say."
 msgstr "我是消息转发Bot，请告诉我你想说的话"
 
 #: src/handlers/command_handler.py:60
@@ -1057,7 +1081,9 @@ msgid "User {} is not verified"
 msgstr "用户{}未通过验证"
 
 #: src/handlers/message_handler.py:275
-msgid "Captcha is enabled. Please solve the following question and send the result directly\n"
+msgid ""
+"Captcha is enabled. Please solve the following question and send the result "
+"directly\n"
 msgstr "验证码已启用。请回答以下问题并直接发送结果\n"
 
 #: src/handlers/message_handler.py:282 src/utils/captcha.py:128
@@ -1252,7 +1278,8 @@ msgstr "重置回复消息"
 
 #: src/handlers/admin_handler.py
 #, python-brace-format
-msgid "{permission} is used to render the permission variable, for example \"{}\"."
+msgid ""
+"{permission} is used to render the permission variable, for example \"{}\"."
 msgstr "{permission} 用作渲染权限变量，例如「{}」。"
 
 #: src/handlers/admin_handler.py
@@ -1290,8 +1317,12 @@ msgid "Unknown permission keys: {}"
 msgstr "未知权限键：{}"
 
 #: src/handlers/command_handler.py
-msgid "Usage: /allow photo video link or /disallow photo video link (multiple keys allowed). Use all to grant/deny all permissions."
-msgstr "用法：/allow photo video link 或 /disallow photo video link （可多选）。使用 all 键时授予/拒绝全部权限。"
+msgid ""
+"Usage: /allow photo video link or /disallow photo video link (multiple keys "
+"allowed). Use all to grant/deny all permissions."
+msgstr ""
+"用法：/allow photo video link 或 /disallow photo video link （可多选）。使用 all "
+"键时授予/拒绝全部权限。"
 
 #: src/handlers/command_handler.py
 #, python-brace-format
@@ -1372,7 +1403,9 @@ msgid "Username Permission"
 msgstr "用户名权限"
 
 #: src/utils/permissions.py
-msgid "You are not allowed to send \"{permission}\" type messages. Please contact the other party to lift the restriction."
+msgid ""
+"You are not allowed to send \"{permission}\" type messages. Please contact "
+"the other party to lift the restriction."
 msgstr "您不被允许发送「{permission}」类型消息，请先联系对方解限。"
 
 #: src/handlers/message_handler.py
@@ -1409,7 +1442,9 @@ msgid "{}: global {}, override {}, effective {}"
 msgstr "{}：全局 {}，覆盖 {}，生效 {}"
 
 #: src/handlers/command_handler.py
-msgid "Usage: /resetpermissions photo video link (multiple keys allowed). Use all to reset all permission overrides."
+msgid ""
+"Usage: /resetpermissions photo video link (multiple keys allowed). Use all "
+"to reset all permission overrides."
 msgstr "用法：/resetpermissions photo video link（可多选）。使用 all 键时重置全部权限覆盖。"
 
 #: src/handlers/command_handler.py
@@ -1424,3 +1459,9 @@ msgstr "查看用户权限"
 #: src/bot.py
 msgid "Reset user permission overrides"
 msgstr "重置用户权限覆盖"
+
+msgid "Stale topic {} for user {} removed"
+msgstr "已移除失效话题 {}（用户 {}）"
+
+msgid "Topic {} missing for user {}, recreating and retrying"
+msgstr "话题 {} 对用户 {} 不存在，正在重建并重试"
