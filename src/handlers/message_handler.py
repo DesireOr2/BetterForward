@@ -153,7 +153,7 @@ class MessageHandler:
                     )
                 except ApiTelegramException as e:
                     # If spam topic not found, try to recreate it
-                    if "message thread not found" in str(e).lower() or "topic" in str(e).lower():
+                    if self._is_topic_missing_error(e):
                         logger.warning(_("Spam topic not found, attempting to recreate..."))
                         if self.bot_instance:
                             try:
@@ -214,8 +214,8 @@ class MessageHandler:
         if thread_id is None:
             return
 
-        # Forward the message
-        fwd_msg = self._forward_to_group(message, msg_text, msg_caption, thread_id, cursor)
+        # Forward the message (may recreate topic and return a new thread_id)
+        fwd_msg, thread_id = self._forward_to_group(message, msg_text, msg_caption, thread_id, cursor, db)
         if fwd_msg is None:
             return
 
@@ -360,6 +360,28 @@ class MessageHandler:
             return auto_response_result["response"]
         return None
 
+    @staticmethod
+    def _is_topic_missing_error(exc: Exception) -> bool:
+        """Return True when Telegram reports a deleted/missing forum topic."""
+        description = getattr(exc, "description", "") or ""
+        haystack = f"{exc} {description}".lower()
+        markers = (
+            "message thread not found",
+            "thread not found",
+            "topic_deleted",
+            "topic not found",
+        )
+        return any(marker in haystack for marker in markers)
+
+    def _invalidate_stale_topic(self, user_id: int, thread_id: int, cursor) -> None:
+        """Remove stale topic mapping and related message links from DB/cache."""
+        cursor.execute("DELETE FROM topics WHERE thread_id = ?", (thread_id,))
+        cursor.execute("DELETE FROM messages WHERE topic_id = ?", (thread_id,))
+        cursor.connection.commit()
+        self.cache.delete(f"threadid_{thread_id}_userid")
+        self.cache.delete(f"chat_{user_id}_threadid")
+        logger.warning(_("Stale topic {} for user {} removed").format(thread_id, user_id))
+
     def _get_or_create_thread(self, message: Message, cursor, db) -> int:
         """Get or create a thread for the user."""
         userid = message.from_user.id
@@ -390,9 +412,22 @@ class MessageHandler:
             self.cache.set(f"chat_{userid}_threadid", thread_id)
         return thread_id
 
+    def _fallback_forward_to_general(self, message: Message, error: Exception) -> None:
+        """Notify operators and dump the original message into General."""
+        logger.error(_("Failed to forward message from user {}").format(message.from_user.id))
+        logger.error(error)
+        self.bot.send_message(self.group_id,
+                              _("Failed to forward message from user {}").format(message.from_user.id),
+                              message_thread_id=None)
+        self.bot.forward_message(self.group_id, message.chat.id, message_id=message.message_id)
+
     def _forward_to_group(self, message: Message, msg_text: str, msg_caption: str,
-                          thread_id: int, cursor) -> Message:
-        """Forward a message to the group."""
+                          thread_id: int, cursor, db) -> tuple[Message | None, int]:
+        """Forward a message to the group.
+
+        Returns (forwarded_message, effective_thread_id). When the stored topic is gone,
+        invalidates stale state, recreates a topic, and retries the current message.
+        """
         try:
             reply_id = self._get_reply_id(message, thread_id, cursor, in_group=False)
             fwd_msg = self._send_message_by_type(message, msg_text, msg_caption,
@@ -400,22 +435,33 @@ class MessageHandler:
             cursor.execute(
                 "INSERT INTO messages (received_id, forwarded_id, topic_id, in_group) VALUES (?, ?, ?, ?)",
                 (message.message_id, fwd_msg.message_id, thread_id, False))
-            return fwd_msg
+            return fwd_msg, thread_id
         except ApiTelegramException as e:
-            if "message thread not found" in str(e):
-                cursor.execute("DELETE FROM topics WHERE thread_id = ?", (thread_id,))
-                cursor.connection.commit()
-                self.cache.delete(f"threadid_{thread_id}_userid")
-                self.cache.delete(f"chat_{message.from_user.id}_threadid")
-                # Re-queue the message
-                return None
-            logger.error(_("Failed to forward message from user {}").format(message.from_user.id))
-            logger.error(e)
-            self.bot.send_message(self.group_id,
-                                  _("Failed to forward message from user {}").format(message.from_user.id),
-                                  message_thread_id=None)
-            self.bot.forward_message(self.group_id, message.chat.id, message_id=message.message_id)
-            return None
+            if not self._is_topic_missing_error(e):
+                self._fallback_forward_to_general(message, e)
+                return None, thread_id
+
+            logger.warning(
+                _("Topic {} missing for user {}, recreating and retrying").format(
+                    thread_id, message.from_user.id))
+            self._invalidate_stale_topic(message.from_user.id, thread_id, cursor)
+
+            new_thread_id = self._get_or_create_thread(message, cursor, db)
+            if new_thread_id is None:
+                self._fallback_forward_to_general(message, e)
+                return None, thread_id
+
+            try:
+                # Reply targets from the deleted topic are invalid; send without reply.
+                fwd_msg = self._send_message_by_type(message, msg_text, msg_caption,
+                                                     self.group_id, new_thread_id, None)
+                cursor.execute(
+                    "INSERT INTO messages (received_id, forwarded_id, topic_id, in_group) VALUES (?, ?, ?, ?)",
+                    (message.message_id, fwd_msg.message_id, new_thread_id, False))
+                return fwd_msg, new_thread_id
+            except ApiTelegramException as retry_error:
+                self._fallback_forward_to_general(message, retry_error)
+                return None, new_thread_id
 
     def _handle_group_message(self, message: Message, msg_text: str, msg_caption: str, cursor, db):
         """Handle messages from group to users."""
