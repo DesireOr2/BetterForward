@@ -1,0 +1,14 @@
+.git
+.github
+.venv
+.pytest_cache
+__pycache__
+*.pyc
+tests
+requirements-dev.txt
+pytest.ini
+docs
+*.md
+.cursor
+.vscode
+.idea

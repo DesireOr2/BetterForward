@@ -8,6 +8,19 @@ import pytz
 
 from src.config import logger, _
 
+_REGEX_META_RE = re.compile(r"[.\\*+?^${}()|\[\]\\]")
+
+
+def looks_like_regex(pattern: str) -> bool:
+    """Return True when pattern compiles and contains regex metacharacters."""
+    if not pattern:
+        return False
+    try:
+        re.compile(pattern)
+    except re.error:
+        return False
+    return _REGEX_META_RE.search(pattern) is not None
+
 
 class AutoResponseManager:
     """Manages automatic responses to user messages."""
@@ -51,7 +64,7 @@ class AutoResponseManager:
                         return {"response": row['value'], "type": row['type']}
                 except re.error:
                     logger.error(_("Invalid regular expression: {}").format(row['key']))
-                    return None
+                    continue
         return None
 
     def _is_within_time_range(self, current_time, start_time, end_time) -> bool:

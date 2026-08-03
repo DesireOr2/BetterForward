@@ -1465,3 +1465,6 @@ msgstr "已移除失效话题 {}（用户 {}）"
 
 msgid "Topic {} missing for user {}, recreating and retrying"
 msgstr "话题 {} 对用户 {} 不存在，正在重建并重试"
+
+msgid "This verification is not for you."
+msgstr "此验证不属于你。"

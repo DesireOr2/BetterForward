@@ -1472,5 +1472,8 @@ msgstr "無効なトピック {}（ユーザー {}）を削除しました"
 msgid "Topic {} missing for user {}, recreating and retrying"
 msgstr "トピック {} がユーザー {} に見つからないため再作成して再試行します"
 
+msgid "This verification is not for you."
+msgstr "この認証はあなた向けではありません。"
+
 #~ msgid "Do not forward message"
 #~ msgstr "メッセージを転送しない"

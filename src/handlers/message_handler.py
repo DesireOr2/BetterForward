@@ -1,7 +1,6 @@
 """Message handling module."""
 
 import html
-import sqlite3
 import time
 
 from telebot.apihelper import ApiTelegramException, create_forum_topic
@@ -9,9 +8,10 @@ from telebot.formatting import apply_html_entities
 from telebot.types import Message
 
 from src.config import logger, _
+from src.utils.db_helper import get_db_connection
 from src.utils.helpers import build_user_info_pin_text, escape_markdown, send_and_pin_user_info
 from src.utils.message_permissions import classify_message_permissions
-from src.utils.message_split import split_html_text
+from src.utils.message_split import split_caption, split_html_text
 
 
 class MessageHandler:
@@ -52,7 +52,8 @@ class MessageHandler:
         else:
             msg_caption = None
 
-        with sqlite3.connect(self.db_path) as db:
+        # Autocommit + WAL connection: avoid holding a write transaction across Telegram I/O.
+        with get_db_connection(self.db_path) as db:
             cursor = db.cursor()
 
             if message.chat.id != self.group_id:
@@ -520,21 +521,40 @@ class MessageHandler:
             return int(result[0])
         return None
 
+    def _send_caption_followups(self, chat_id: int, thread_id, extras: list[str],
+                                silent: bool) -> list[Message]:
+        """Send overflow caption text as normal messages."""
+        sent = []
+        for chunk in extras:
+            sent.append(
+                self.bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    message_thread_id=thread_id,
+                    parse_mode='HTML',
+                    disable_notification=silent,
+                )
+            )
+        return sent
+
     def _send_message_by_type(self, message: Message, msg_text: str, msg_caption: str,
                               chat_id: int, thread_id: int = None, reply_id: int = None,
                               silent: bool = False) -> list[Message]:
         """Send a message based on its type.
 
         Text messages longer than Telegram's limit are split into multiple sends.
-        Only the first chunk keeps reply_to_message_id. Non-text types return a
-        single-element list.
+        Oversized captions are truncated onto the media with follow-up text chunks.
+        Only the first chunk keeps reply_to_message_id.
         """
         match message.content_type:
             case "photo":
-                return [self.bot.send_photo(chat_id=chat_id, photo=message.photo[-1].file_id,
-                                            caption=msg_caption, message_thread_id=thread_id,
+                caption, extras = split_caption(msg_caption)
+                sent = [self.bot.send_photo(chat_id=chat_id, photo=message.photo[-1].file_id,
+                                            caption=caption, message_thread_id=thread_id,
                                             reply_to_message_id=reply_id, parse_mode='HTML',
                                             disable_notification=silent)]
+                sent.extend(self._send_caption_followups(chat_id, thread_id, extras, silent))
+                return sent
             case "text":
                 chunks = split_html_text(msg_text)
                 sent_messages = []
@@ -556,30 +576,45 @@ class MessageHandler:
                                               reply_to_message_id=reply_id,
                                               disable_notification=silent)]
             case "video":
-                return [self.bot.send_video(chat_id=chat_id, video=message.video.file_id,
-                                            caption=msg_caption, message_thread_id=thread_id,
+                caption, extras = split_caption(msg_caption)
+                sent = [self.bot.send_video(chat_id=chat_id, video=message.video.file_id,
+                                            caption=caption, message_thread_id=thread_id,
                                             reply_to_message_id=reply_id, parse_mode='HTML',
                                             disable_notification=silent)]
+                sent.extend(self._send_caption_followups(chat_id, thread_id, extras, silent))
+                return sent
             case "document":
-                return [self.bot.send_document(chat_id=chat_id, document=message.document.file_id,
-                                               caption=msg_caption, message_thread_id=thread_id,
+                caption, extras = split_caption(msg_caption)
+                sent = [self.bot.send_document(chat_id=chat_id, document=message.document.file_id,
+                                               caption=caption, message_thread_id=thread_id,
                                                reply_to_message_id=reply_id, parse_mode='HTML',
                                                disable_notification=silent)]
+                sent.extend(self._send_caption_followups(chat_id, thread_id, extras, silent))
+                return sent
             case "audio":
-                return [self.bot.send_audio(chat_id=chat_id, audio=message.audio.file_id,
-                                            caption=msg_caption, message_thread_id=thread_id,
+                caption, extras = split_caption(msg_caption)
+                sent = [self.bot.send_audio(chat_id=chat_id, audio=message.audio.file_id,
+                                            caption=caption, message_thread_id=thread_id,
                                             reply_to_message_id=reply_id, parse_mode='HTML',
                                             disable_notification=silent)]
+                sent.extend(self._send_caption_followups(chat_id, thread_id, extras, silent))
+                return sent
             case "voice":
-                return [self.bot.send_voice(chat_id=chat_id, voice=message.voice.file_id,
-                                            caption=msg_caption, message_thread_id=thread_id,
+                caption, extras = split_caption(msg_caption)
+                sent = [self.bot.send_voice(chat_id=chat_id, voice=message.voice.file_id,
+                                            caption=caption, message_thread_id=thread_id,
                                             reply_to_message_id=reply_id, parse_mode='HTML',
                                             disable_notification=silent)]
+                sent.extend(self._send_caption_followups(chat_id, thread_id, extras, silent))
+                return sent
             case "animation":
-                return [self.bot.send_animation(chat_id=chat_id, animation=message.animation.file_id,
-                                                caption=msg_caption, message_thread_id=thread_id,
+                caption, extras = split_caption(msg_caption)
+                sent = [self.bot.send_animation(chat_id=chat_id, animation=message.animation.file_id,
+                                                caption=caption, message_thread_id=thread_id,
                                                 reply_to_message_id=reply_id, parse_mode='HTML',
                                                 disable_notification=silent)]
+                sent.extend(self._send_caption_followups(chat_id, thread_id, extras, silent))
+                return sent
             case "contact":
                 return [self.bot.send_contact(chat_id=chat_id,
                                               phone_number=message.contact.phone_number,

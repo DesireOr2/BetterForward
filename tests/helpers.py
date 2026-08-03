@@ -108,6 +108,13 @@ def init_core_db(db_path: str):
         )
         cursor.execute(
             """
+            CREATE TABLE verified_users (
+                user_id INTEGER PRIMARY KEY
+            )
+            """
+        )
+        cursor.execute(
+            """
             CREATE TABLE settings (
                 id INTEGER PRIMARY KEY,
                 key TEXT NOT NULL,
