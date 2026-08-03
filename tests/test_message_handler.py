@@ -183,6 +183,58 @@ def test_group_message_forwards_to_mapped_user(handler_env):
     assert row == (66, 5001, thread_id, 1)
 
 
+def test_long_group_text_is_split_when_forwarding_to_user(handler_env):
+    handler, bot, cache, db_path = handler_env
+    user_id = 505
+    thread_id = 888
+    _seed_topic(db_path, user_id, thread_id)
+
+    long_text = ("hello world\n" * 400)
+    assert len(long_text) > 4096
+
+    sent = []
+
+    def _send_message(**kwargs):
+        msg = MagicMock(spec=Message)
+        msg.message_id = 7000 + len(sent)
+        sent.append(kwargs)
+        return msg
+
+    bot.send_message.side_effect = _send_message
+
+    message = make_message(
+        message_id=99,
+        chat_id=GROUP_ID,
+        chat_type="supergroup",
+        user_id=999,
+        text=long_text,
+        message_thread_id=thread_id,
+    )
+    handler.handle_message(message)
+
+    assert len(sent) >= 2
+    assert all(call["chat_id"] == user_id for call in sent)
+    assert all(len(call["text"]) <= 4096 for call in sent)
+    assert "".join(call["text"] for call in sent) == long_text
+    assert sent[0].get("reply_to_message_id") is None
+    assert all(call.get("reply_to_message_id") is None for call in sent[1:])
+
+    alert_calls = [
+        call for call in bot.send_message.call_args_list
+        if call.kwargs.get("chat_id") == GROUP_ID
+        or (call.args and call.args[0] == GROUP_ID)
+    ]
+    assert alert_calls == []
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT forwarded_id FROM messages WHERE received_id = ? AND topic_id = ? ORDER BY id",
+            (99, thread_id),
+        ).fetchall()
+    assert len(rows) == len(sent)
+    assert [row[0] for row in rows] == [7000 + i for i in range(len(sent))]
+
+
 def test_denied_permission_blocks_forward(handler_env):
     handler, bot, cache, db_path = handler_env
     user_id = 404

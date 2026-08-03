@@ -11,6 +11,7 @@ from telebot.types import Message
 from src.config import logger, _
 from src.utils.helpers import build_user_info_pin_text, escape_markdown, send_and_pin_user_info
 from src.utils.message_permissions import classify_message_permissions
+from src.utils.message_split import split_html_text
 
 
 class MessageHandler:
@@ -127,8 +128,8 @@ class MessageHandler:
 
                 # Forward directly to spam topic without creating user thread
                 try:
-                    fwd_msg = self._send_message_by_type(message, msg_text, msg_caption,
-                                                         self.group_id, spam_topic_id, None, silent=True)
+                    fwd_msgs = self._send_message_by_type(message, msg_text, msg_caption,
+                                                          self.group_id, spam_topic_id, None, silent=True)
 
                     # Build alert message based on detection info
                     alert_msg = f"🚫 {_('[Spam Detected]')}\n"
@@ -148,7 +149,7 @@ class MessageHandler:
                         self.group_id,
                         alert_msg,
                         message_thread_id=spam_topic_id,
-                        reply_to_message_id=fwd_msg.message_id,
+                        reply_to_message_id=fwd_msgs[0].message_id,
                         disable_notification=True
                     )
                 except ApiTelegramException as e:
@@ -162,8 +163,8 @@ class MessageHandler:
                                 logger.info(_("Spam topic recreated, retrying message forward..."))
 
                                 # Retry forwarding
-                                fwd_msg = self._send_message_by_type(message, msg_text, msg_caption,
-                                                                     self.group_id, spam_topic_id, None, silent=True)
+                                fwd_msgs = self._send_message_by_type(message, msg_text, msg_caption,
+                                                                      self.group_id, spam_topic_id, None, silent=True)
 
                                 # Build and send alert message
                                 alert_msg = f"🚫 {_('[Spam Detected]')}\n"
@@ -180,7 +181,7 @@ class MessageHandler:
                                     self.group_id,
                                     alert_msg,
                                     message_thread_id=spam_topic_id,
-                                    reply_to_message_id=fwd_msg.message_id,
+                                    reply_to_message_id=fwd_msgs[0].message_id,
                                     disable_notification=True
                                 )
                             except Exception as retry_error:
@@ -421,21 +422,27 @@ class MessageHandler:
                               message_thread_id=None)
         self.bot.forward_message(self.group_id, message.chat.id, message_id=message.message_id)
 
+    def _store_forward_mappings(self, cursor, received_id: int, forwarded_msgs: list[Message],
+                                topic_id: int, in_group: bool) -> None:
+        """Persist one messages-row per forwarded chunk for reply lookup."""
+        for fwd_msg in forwarded_msgs:
+            cursor.execute(
+                "INSERT INTO messages (received_id, forwarded_id, topic_id, in_group) VALUES (?, ?, ?, ?)",
+                (received_id, fwd_msg.message_id, topic_id, in_group))
+
     def _forward_to_group(self, message: Message, msg_text: str, msg_caption: str,
                           thread_id: int, cursor, db) -> tuple[Message | None, int]:
         """Forward a message to the group.
 
-        Returns (forwarded_message, effective_thread_id). When the stored topic is gone,
+        Returns (first_forwarded_message, effective_thread_id). When the stored topic is gone,
         invalidates stale state, recreates a topic, and retries the current message.
         """
         try:
             reply_id = self._get_reply_id(message, thread_id, cursor, in_group=False)
-            fwd_msg = self._send_message_by_type(message, msg_text, msg_caption,
-                                                 self.group_id, thread_id, reply_id)
-            cursor.execute(
-                "INSERT INTO messages (received_id, forwarded_id, topic_id, in_group) VALUES (?, ?, ?, ?)",
-                (message.message_id, fwd_msg.message_id, thread_id, False))
-            return fwd_msg, thread_id
+            fwd_msgs = self._send_message_by_type(message, msg_text, msg_caption,
+                                                  self.group_id, thread_id, reply_id)
+            self._store_forward_mappings(cursor, message.message_id, fwd_msgs, thread_id, False)
+            return fwd_msgs[0], thread_id
         except ApiTelegramException as e:
             if not self._is_topic_missing_error(e):
                 self._fallback_forward_to_general(message, e)
@@ -453,12 +460,10 @@ class MessageHandler:
 
             try:
                 # Reply targets from the deleted topic are invalid; send without reply.
-                fwd_msg = self._send_message_by_type(message, msg_text, msg_caption,
-                                                     self.group_id, new_thread_id, None)
-                cursor.execute(
-                    "INSERT INTO messages (received_id, forwarded_id, topic_id, in_group) VALUES (?, ?, ?, ?)",
-                    (message.message_id, fwd_msg.message_id, new_thread_id, False))
-                return fwd_msg, new_thread_id
+                fwd_msgs = self._send_message_by_type(message, msg_text, msg_caption,
+                                                      self.group_id, new_thread_id, None)
+                self._store_forward_mappings(cursor, message.message_id, fwd_msgs, new_thread_id, False)
+                return fwd_msgs[0], new_thread_id
             except ApiTelegramException as retry_error:
                 self._fallback_forward_to_general(message, retry_error)
                 return None, new_thread_id
@@ -476,11 +481,10 @@ class MessageHandler:
             reply_id = self._get_reply_id(message, message.message_thread_id, cursor, in_group=True)
 
             try:
-                fwd_msg = self._send_message_by_type(message, msg_text, msg_caption,
-                                                     user_id, None, reply_id)
-                cursor.execute(
-                    "INSERT INTO messages (received_id, forwarded_id, topic_id, in_group) VALUES (?, ?, ?, ?)",
-                    (message.message_id, fwd_msg.message_id, message.message_thread_id, True))
+                fwd_msgs = self._send_message_by_type(message, msg_text, msg_caption,
+                                                      user_id, None, reply_id)
+                self._store_forward_mappings(
+                    cursor, message.message_id, fwd_msgs, message.message_thread_id, True)
             except ApiTelegramException as e:
                 logger.error(_("Failed to forward message to user {}").format(user_id))
                 logger.error(e)
@@ -518,57 +522,72 @@ class MessageHandler:
 
     def _send_message_by_type(self, message: Message, msg_text: str, msg_caption: str,
                               chat_id: int, thread_id: int = None, reply_id: int = None,
-                              silent: bool = False) -> Message:
-        """Send a message based on its type."""
+                              silent: bool = False) -> list[Message]:
+        """Send a message based on its type.
+
+        Text messages longer than Telegram's limit are split into multiple sends.
+        Only the first chunk keeps reply_to_message_id. Non-text types return a
+        single-element list.
+        """
         match message.content_type:
             case "photo":
-                return self.bot.send_photo(chat_id=chat_id, photo=message.photo[-1].file_id,
-                                           caption=msg_caption, message_thread_id=thread_id,
-                                           reply_to_message_id=reply_id, parse_mode='HTML',
-                                           disable_notification=silent)
+                return [self.bot.send_photo(chat_id=chat_id, photo=message.photo[-1].file_id,
+                                            caption=msg_caption, message_thread_id=thread_id,
+                                            reply_to_message_id=reply_id, parse_mode='HTML',
+                                            disable_notification=silent)]
             case "text":
-                return self.bot.send_message(chat_id=chat_id, text=msg_text,
-                                             message_thread_id=thread_id,
-                                             reply_to_message_id=reply_id, parse_mode='HTML',
-                                             disable_notification=silent)
+                chunks = split_html_text(msg_text)
+                sent_messages = []
+                for index, chunk in enumerate(chunks):
+                    sent_messages.append(
+                        self.bot.send_message(
+                            chat_id=chat_id,
+                            text=chunk,
+                            message_thread_id=thread_id,
+                            reply_to_message_id=reply_id if index == 0 else None,
+                            parse_mode='HTML',
+                            disable_notification=silent,
+                        )
+                    )
+                return sent_messages
             case "sticker":
-                return self.bot.send_sticker(chat_id=chat_id, sticker=message.sticker.file_id,
-                                             message_thread_id=thread_id,
-                                             reply_to_message_id=reply_id,
-                                             disable_notification=silent)
+                return [self.bot.send_sticker(chat_id=chat_id, sticker=message.sticker.file_id,
+                                              message_thread_id=thread_id,
+                                              reply_to_message_id=reply_id,
+                                              disable_notification=silent)]
             case "video":
-                return self.bot.send_video(chat_id=chat_id, video=message.video.file_id,
-                                           caption=msg_caption, message_thread_id=thread_id,
-                                           reply_to_message_id=reply_id, parse_mode='HTML',
-                                           disable_notification=silent)
+                return [self.bot.send_video(chat_id=chat_id, video=message.video.file_id,
+                                            caption=msg_caption, message_thread_id=thread_id,
+                                            reply_to_message_id=reply_id, parse_mode='HTML',
+                                            disable_notification=silent)]
             case "document":
-                return self.bot.send_document(chat_id=chat_id, document=message.document.file_id,
-                                              caption=msg_caption, message_thread_id=thread_id,
-                                              reply_to_message_id=reply_id, parse_mode='HTML',
-                                              disable_notification=silent)
-            case "audio":
-                return self.bot.send_audio(chat_id=chat_id, audio=message.audio.file_id,
-                                           caption=msg_caption, message_thread_id=thread_id,
-                                           reply_to_message_id=reply_id, parse_mode='HTML',
-                                           disable_notification=silent)
-            case "voice":
-                return self.bot.send_voice(chat_id=chat_id, voice=message.voice.file_id,
-                                           caption=msg_caption, message_thread_id=thread_id,
-                                           reply_to_message_id=reply_id, parse_mode='HTML',
-                                           disable_notification=silent)
-            case "animation":
-                return self.bot.send_animation(chat_id=chat_id, animation=message.animation.file_id,
+                return [self.bot.send_document(chat_id=chat_id, document=message.document.file_id,
                                                caption=msg_caption, message_thread_id=thread_id,
                                                reply_to_message_id=reply_id, parse_mode='HTML',
-                                               disable_notification=silent)
+                                               disable_notification=silent)]
+            case "audio":
+                return [self.bot.send_audio(chat_id=chat_id, audio=message.audio.file_id,
+                                            caption=msg_caption, message_thread_id=thread_id,
+                                            reply_to_message_id=reply_id, parse_mode='HTML',
+                                            disable_notification=silent)]
+            case "voice":
+                return [self.bot.send_voice(chat_id=chat_id, voice=message.voice.file_id,
+                                            caption=msg_caption, message_thread_id=thread_id,
+                                            reply_to_message_id=reply_id, parse_mode='HTML',
+                                            disable_notification=silent)]
+            case "animation":
+                return [self.bot.send_animation(chat_id=chat_id, animation=message.animation.file_id,
+                                                caption=msg_caption, message_thread_id=thread_id,
+                                                reply_to_message_id=reply_id, parse_mode='HTML',
+                                                disable_notification=silent)]
             case "contact":
-                return self.bot.send_contact(chat_id=chat_id,
-                                             phone_number=message.contact.phone_number,
-                                             first_name=message.contact.first_name,
-                                             last_name=message.contact.last_name,
-                                             message_thread_id=thread_id,
-                                             reply_to_message_id=reply_id,
-                                             disable_notification=silent)
+                return [self.bot.send_contact(chat_id=chat_id,
+                                              phone_number=message.contact.phone_number,
+                                              first_name=message.contact.first_name,
+                                              last_name=message.contact.last_name,
+                                              message_thread_id=thread_id,
+                                              reply_to_message_id=reply_id,
+                                              disable_notification=silent)]
             case _:
                 logger.error(_("Unsupported message type") + message.content_type)
                 raise ValueError(_("Unsupported message type") + message.content_type)
