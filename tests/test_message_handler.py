@@ -235,6 +235,60 @@ def test_long_group_text_is_split_when_forwarding_to_user(handler_env):
     assert [row[0] for row in rows] == [7000 + i for i in range(len(sent))]
 
 
+def test_partial_long_text_resumes_after_stale_topic(handler_env):
+    """Already-sent chunks must not be resent when topic is recreated mid-split."""
+    handler, bot, cache, db_path = handler_env
+    user_id = 606
+    stale_thread_id = 333
+    new_thread_id = 444
+    _seed_topic(db_path, user_id, stale_thread_id)
+    cache.set(f"chat_{user_id}_threadid", stale_thread_id)
+
+    long_text = ("hello world\n" * 400)
+    assert len(long_text) > 4096
+
+    first = MagicMock(spec=Message)
+    first.message_id = 8100
+    resumed = MagicMock(spec=Message)
+    resumed.message_id = 8101
+
+    bot.send_message.side_effect = [
+        first,
+        make_api_error("Bad Request: TOPIC_DELETED"),
+        resumed,
+    ]
+
+    message = make_message(
+        message_id=101,
+        chat_id=user_id,
+        user_id=user_id,
+        text=long_text,
+    )
+
+    with patch(
+        "src.handlers.message_handler.create_forum_topic",
+        return_value={"message_thread_id": new_thread_id},
+    ), patch("src.handlers.message_handler.send_and_pin_user_info"):
+        handler.handle_message(message)
+
+    # 1 success on stale topic + 1 failure + 1 resume on new topic (not a full resend).
+    assert bot.send_message.call_count == 3
+    first_text = bot.send_message.call_args_list[0].kwargs["text"]
+    resume_call = bot.send_message.call_args_list[2].kwargs
+    assert resume_call["message_thread_id"] == new_thread_id
+    assert resume_call.get("reply_to_message_id") is None
+    assert first_text + resume_call["text"] == long_text
+    assert len(resume_call["text"]) <= 4096
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT forwarded_id, topic_id FROM messages WHERE received_id = ? ORDER BY id",
+            (101,),
+        ).fetchall()
+    # Only chunks delivered on the new topic are persisted.
+    assert rows == [(8101, new_thread_id)]
+    bot.forward_message.assert_not_called()
+
+
 def test_denied_permission_blocks_forward(handler_env):
     handler, bot, cache, db_path = handler_env
     user_id = 404

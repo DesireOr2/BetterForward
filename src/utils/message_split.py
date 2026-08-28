@@ -16,6 +16,9 @@ def split_html_text(text: str | None, limit: int = MAX_MESSAGE_LENGTH) -> list[s
     Prefers breaking on newlines, sentence ends, or spaces. Cut points inside an
     HTML tag move before ``<``. Open tags are closed at chunk ends and reopened
     at the next chunk so ``parse_mode=HTML`` stays valid.
+
+    Chunk length always accounts for the reopen prefix and closing suffix so the
+    final string never exceeds ``limit``.
     """
     if text is None:
         return [""]
@@ -30,26 +33,52 @@ def split_html_text(text: str | None, limit: int = MAX_MESSAGE_LENGTH) -> list[s
 
     while remaining:
         prefix = _reopen_tags(open_tags)
-        available = limit - len(prefix)
-        if available <= 0:
-            # Pathological tag prefix; hard-cut raw remainder.
+
+        trial_stack = _track_tags(remaining, open_tags)
+        trial_close = _close_tags(trial_stack)
+        if len(prefix) + len(remaining) + len(trial_close) <= limit:
+            parts.append(prefix + remaining + trial_close)
+            break
+
+        max_body = limit - len(prefix)
+        if max_body <= 0:
+            # Pathological reopen prefix; hard-cut raw remainder.
             parts.append(remaining[:limit])
             remaining = remaining[limit:]
             open_tags = _track_tags(parts[-1], [])
             continue
 
-        if len(prefix) + len(remaining) <= limit:
-            open_tags = _track_tags(remaining, open_tags)
-            parts.append(prefix + remaining + _close_tags(open_tags))
-            break
+        cut = min(len(remaining), max_body)
+        if cut < len(remaining):
+            safe = _find_safe_cut(remaining, cut)
+            if safe > 0:
+                cut = safe
 
-        cut = _find_safe_cut(remaining, available)
-        if cut <= 0:
-            cut = available
-        body = remaining[:cut]
-        remaining = remaining[cut:]
-        open_tags = _track_tags(body, open_tags)
-        parts.append(prefix + body + _close_tags(open_tags))
+        fitted = False
+        while cut > 0:
+            body = remaining[:cut]
+            stack = _track_tags(body, open_tags)
+            close = _close_tags(stack)
+            if len(prefix) + len(body) + len(close) <= limit:
+                parts.append(prefix + body + close)
+                remaining = remaining[cut:]
+                open_tags = stack
+                fitted = True
+                break
+
+            overflow = len(prefix) + len(body) + len(close) - limit
+            new_budget = cut - max(overflow, 1)
+            if new_budget <= 0:
+                break
+            safe = _find_safe_cut(remaining, new_budget)
+            cut = safe if safe > 0 else new_budget
+
+        if not fitted:
+            # Cannot balance tags within limit; hard-cut raw body.
+            hard = min(len(remaining), max(1, max_body))
+            parts.append(prefix + remaining[:hard])
+            remaining = remaining[hard:]
+            open_tags = _track_tags(parts[-1], [])
 
     return [part for part in parts if part != ""] or [""]
 

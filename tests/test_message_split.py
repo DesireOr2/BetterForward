@@ -43,3 +43,24 @@ def test_split_caption_returns_followups():
     assert len(caption) <= MAX_CAPTION_LENGTH
     assert extras
     assert caption + "".join(extras) == text
+
+
+def test_html_chunks_reserve_space_for_closing_tags():
+    text = "<b><i><u>" + ("x" * 5000) + "</u></i></b>"
+    chunks = split_html_text(text, limit=4096)
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 4096 for chunk in chunks)
+    assert all("</b>" in chunk for chunk in chunks[:-1])
+
+
+def test_html_link_chunks_stay_under_limit():
+    text = '<a href="https://example.com/path">' + ("y" * 4500) + "</a>"
+    chunks = split_html_text(text, limit=4096)
+    assert all(len(chunk) <= 4096 for chunk in chunks)
+
+
+def test_html_caption_stays_under_caption_limit():
+    text = "<b><i><u>" + ("x" * 2000) + "</u></i></b>"
+    caption, extras = split_caption(text)
+    assert len(caption) <= MAX_CAPTION_LENGTH
+    assert all(len(extra) <= 4096 for extra in extras)

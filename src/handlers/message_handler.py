@@ -14,6 +14,18 @@ from src.utils.message_permissions import classify_message_permissions
 from src.utils.message_split import split_caption, split_html_text
 
 
+class PartialSendError(Exception):
+    """Raised when some chunks were sent before a Telegram API failure."""
+
+    def __init__(self, cause: Exception, sent: list[Message], remaining_chunks: list[str],
+                 *, needs_full_retry: bool = False):
+        self.cause = cause
+        self.sent = sent
+        self.remaining_chunks = remaining_chunks
+        self.needs_full_retry = needs_full_retry
+        super().__init__(str(cause))
+
+
 class MessageHandler:
     """Handles message forwarding between users and group."""
 
@@ -153,9 +165,10 @@ class MessageHandler:
                         reply_to_message_id=fwd_msgs[0].message_id,
                         disable_notification=True
                     )
-                except ApiTelegramException as e:
+                except (PartialSendError, ApiTelegramException) as e:
+                    api_error = e.cause if isinstance(e, PartialSendError) else e
                     # If spam topic not found, try to recreate it
-                    if self._is_topic_missing_error(e):
+                    if self._is_topic_missing_error(api_error):
                         logger.warning(_("Spam topic not found, attempting to recreate..."))
                         if self.bot_instance:
                             try:
@@ -198,7 +211,7 @@ class MessageHandler:
                         else:
                             logger.error(_("Cannot recreate spam topic: bot instance not available"))
                     else:
-                        logger.error(_("Failed to forward spam message: {}").format(str(e)))
+                        logger.error(_("Failed to forward spam message: {}").format(str(api_error)))
 
                 # Log processing time
                 processing_time = (time.time() - start_time) * 1000
@@ -436,7 +449,7 @@ class MessageHandler:
         """Forward a message to the group.
 
         Returns (first_forwarded_message, effective_thread_id). When the stored topic is gone,
-        invalidates stale state, recreates a topic, and retries the current message.
+        invalidates stale state, recreates a topic, and retries only undelivered chunks.
         """
         try:
             reply_id = self._get_reply_id(message, thread_id, cursor, in_group=False)
@@ -444,30 +457,60 @@ class MessageHandler:
                                                   self.group_id, thread_id, reply_id)
             self._store_forward_mappings(cursor, message.message_id, fwd_msgs, thread_id, False)
             return fwd_msgs[0], thread_id
+        except PartialSendError as e:
+            return self._recover_stale_topic_send(
+                message, msg_text, msg_caption, thread_id, cursor, db, e.cause,
+                sent=e.sent, remaining_chunks=e.remaining_chunks,
+                needs_full_retry=e.needs_full_retry or not e.sent)
         except ApiTelegramException as e:
-            if not self._is_topic_missing_error(e):
-                self._fallback_forward_to_general(message, e)
-                return None, thread_id
+            return self._recover_stale_topic_send(
+                message, msg_text, msg_caption, thread_id, cursor, db, e,
+                sent=[], remaining_chunks=[], needs_full_retry=True)
 
-            logger.warning(
-                _("Topic {} missing for user {}, recreating and retrying").format(
-                    thread_id, message.from_user.id))
-            self._invalidate_stale_topic(message.from_user.id, thread_id, cursor)
+    def _recover_stale_topic_send(
+            self, message: Message, msg_text: str, msg_caption: str,
+            thread_id: int, cursor, db, error: Exception, *,
+            sent: list[Message], remaining_chunks: list[str],
+            needs_full_retry: bool) -> tuple[Message | None, int]:
+        """Recreate a deleted topic and resume or fully retry the forward."""
+        if not self._is_topic_missing_error(error):
+            self._fallback_forward_to_general(message, error)
+            return None, thread_id
 
-            new_thread_id = self._get_or_create_thread(message, cursor, db)
-            if new_thread_id is None:
-                self._fallback_forward_to_general(message, e)
-                return None, thread_id
+        logger.warning(
+            _("Topic {} missing for user {}, recreating and retrying").format(
+                thread_id, message.from_user.id))
+        self._invalidate_stale_topic(message.from_user.id, thread_id, cursor)
 
-            try:
-                # Reply targets from the deleted topic are invalid; send without reply.
-                fwd_msgs = self._send_message_by_type(message, msg_text, msg_caption,
-                                                      self.group_id, new_thread_id, None)
-                self._store_forward_mappings(cursor, message.message_id, fwd_msgs, new_thread_id, False)
-                return fwd_msgs[0], new_thread_id
-            except ApiTelegramException as retry_error:
-                self._fallback_forward_to_general(message, retry_error)
+        new_thread_id = self._get_or_create_thread(message, cursor, db)
+        if new_thread_id is None:
+            self._fallback_forward_to_general(message, error)
+            return None, thread_id
+
+        try:
+            # Reply targets from the deleted topic are invalid; send without reply.
+            if needs_full_retry or not remaining_chunks:
+                fwd_msgs = self._send_message_by_type(
+                    message, msg_text, msg_caption, self.group_id, new_thread_id, None)
+            else:
+                # Already-delivered chunks lived on the deleted topic; only resume the rest.
+                if sent:
+                    logger.info(
+                        _("Resuming {} remaining chunk(s) for user {} on new topic {}").format(
+                            len(remaining_chunks), message.from_user.id, new_thread_id))
+                fwd_msgs = self._send_text_chunks(
+                    self.group_id, new_thread_id, remaining_chunks, reply_id=None, silent=False)
+            if not fwd_msgs:
+                self._fallback_forward_to_general(message, error)
                 return None, new_thread_id
+            self._store_forward_mappings(cursor, message.message_id, fwd_msgs, new_thread_id, False)
+            return fwd_msgs[0], new_thread_id
+        except PartialSendError as retry_error:
+            self._fallback_forward_to_general(message, retry_error.cause)
+            return None, new_thread_id
+        except ApiTelegramException as retry_error:
+            self._fallback_forward_to_general(message, retry_error)
+            return None, new_thread_id
 
     def _handle_group_message(self, message: Message, msg_text: str, msg_caption: str, cursor, db):
         """Handle messages from group to users."""
@@ -486,6 +529,16 @@ class MessageHandler:
                                                       user_id, None, reply_id)
                 self._store_forward_mappings(
                     cursor, message.message_id, fwd_msgs, message.message_thread_id, True)
+            except PartialSendError as e:
+                logger.error(_("Failed to forward message to user {}").format(user_id))
+                logger.error(e.cause)
+                if e.sent:
+                    self._store_forward_mappings(
+                        cursor, message.message_id, e.sent, message.message_thread_id, True)
+                self.bot.send_message(self.group_id,
+                                      _("[Alert]") + _("Failed to forward message to user {}").format(
+                                          user_id) + "\n" + str(e.cause),
+                                      message_thread_id=message.message_thread_id)
             except ApiTelegramException as e:
                 logger.error(_("Failed to forward message to user {}").format(user_id))
                 logger.error(e)
@@ -521,20 +574,53 @@ class MessageHandler:
             return int(result[0])
         return None
 
-    def _send_caption_followups(self, chat_id: int, thread_id, extras: list[str],
-                                silent: bool) -> list[Message]:
-        """Send overflow caption text as normal messages."""
-        sent = []
-        for chunk in extras:
-            sent.append(
-                self.bot.send_message(
-                    chat_id=chat_id,
-                    text=chunk,
-                    message_thread_id=thread_id,
-                    parse_mode='HTML',
-                    disable_notification=silent,
+    def _send_text_chunks(self, chat_id: int, thread_id, chunks: list[str],
+                          reply_id: int | None, silent: bool) -> list[Message]:
+        """Send pre-split text chunks; only the first keeps reply_to_message_id."""
+        sent_messages: list[Message] = []
+        for index, chunk in enumerate(chunks):
+            try:
+                sent_messages.append(
+                    self.bot.send_message(
+                        chat_id=chat_id,
+                        text=chunk,
+                        message_thread_id=thread_id,
+                        reply_to_message_id=reply_id if index == 0 else None,
+                        parse_mode='HTML',
+                        disable_notification=silent,
+                    )
                 )
-            )
+            except ApiTelegramException as e:
+                raise PartialSendError(e, sent_messages, chunks[index:]) from e
+        return sent_messages
+
+    def _send_media_with_caption(self, send_media, chat_id: int, thread_id,
+                                 msg_caption: str | None, reply_id: int | None,
+                                 silent: bool) -> list[Message]:
+        """Send media plus caption overflow follow-ups, tracking partial progress."""
+        caption, extras = split_caption(msg_caption)
+        sent: list[Message] = []
+        try:
+            sent.append(send_media(caption=caption, reply_to_message_id=reply_id))
+        except ApiTelegramException as e:
+            # Media itself failed: caller must fully retry (cannot resume with text-only).
+            raise PartialSendError(e, sent, extras, needs_full_retry=True) from e
+
+        for index, chunk in enumerate(extras):
+            try:
+                sent.append(
+                    self.bot.send_message(
+                        chat_id=chat_id,
+                        text=chunk,
+                        message_thread_id=thread_id,
+                        parse_mode='HTML',
+                        disable_notification=silent,
+                    )
+                )
+            except ApiTelegramException as e:
+                # Media already left the bot; topic recovery must resend the whole media.
+                raise PartialSendError(
+                    e, sent, extras[index:], needs_full_retry=True) from e
         return sent
 
     def _send_message_by_type(self, message: Message, msg_text: str, msg_caption: str,
@@ -545,76 +631,67 @@ class MessageHandler:
         Text messages longer than Telegram's limit are split into multiple sends.
         Oversized captions are truncated onto the media with follow-up text chunks.
         Only the first chunk keeps reply_to_message_id.
+
+        Raises PartialSendError when some chunks succeed before an API failure so
+        callers can resume the remaining chunks after topic recovery.
         """
         match message.content_type:
             case "photo":
-                caption, extras = split_caption(msg_caption)
-                sent = [self.bot.send_photo(chat_id=chat_id, photo=message.photo[-1].file_id,
-                                            caption=caption, message_thread_id=thread_id,
-                                            reply_to_message_id=reply_id, parse_mode='HTML',
-                                            disable_notification=silent)]
-                sent.extend(self._send_caption_followups(chat_id, thread_id, extras, silent))
-                return sent
+                return self._send_media_with_caption(
+                    lambda caption, reply_to_message_id: self.bot.send_photo(
+                        chat_id=chat_id, photo=message.photo[-1].file_id,
+                        caption=caption, message_thread_id=thread_id,
+                        reply_to_message_id=reply_to_message_id, parse_mode='HTML',
+                        disable_notification=silent),
+                    chat_id, thread_id, msg_caption, reply_id, silent)
             case "text":
-                chunks = split_html_text(msg_text)
-                sent_messages = []
-                for index, chunk in enumerate(chunks):
-                    sent_messages.append(
-                        self.bot.send_message(
-                            chat_id=chat_id,
-                            text=chunk,
-                            message_thread_id=thread_id,
-                            reply_to_message_id=reply_id if index == 0 else None,
-                            parse_mode='HTML',
-                            disable_notification=silent,
-                        )
-                    )
-                return sent_messages
+                return self._send_text_chunks(
+                    chat_id, thread_id, split_html_text(msg_text), reply_id, silent)
             case "sticker":
                 return [self.bot.send_sticker(chat_id=chat_id, sticker=message.sticker.file_id,
                                               message_thread_id=thread_id,
                                               reply_to_message_id=reply_id,
                                               disable_notification=silent)]
             case "video":
-                caption, extras = split_caption(msg_caption)
-                sent = [self.bot.send_video(chat_id=chat_id, video=message.video.file_id,
-                                            caption=caption, message_thread_id=thread_id,
-                                            reply_to_message_id=reply_id, parse_mode='HTML',
-                                            disable_notification=silent)]
-                sent.extend(self._send_caption_followups(chat_id, thread_id, extras, silent))
-                return sent
+                return self._send_media_with_caption(
+                    lambda caption, reply_to_message_id: self.bot.send_video(
+                        chat_id=chat_id, video=message.video.file_id,
+                        caption=caption, message_thread_id=thread_id,
+                        reply_to_message_id=reply_to_message_id, parse_mode='HTML',
+                        disable_notification=silent),
+                    chat_id, thread_id, msg_caption, reply_id, silent)
             case "document":
-                caption, extras = split_caption(msg_caption)
-                sent = [self.bot.send_document(chat_id=chat_id, document=message.document.file_id,
-                                               caption=caption, message_thread_id=thread_id,
-                                               reply_to_message_id=reply_id, parse_mode='HTML',
-                                               disable_notification=silent)]
-                sent.extend(self._send_caption_followups(chat_id, thread_id, extras, silent))
-                return sent
+                return self._send_media_with_caption(
+                    lambda caption, reply_to_message_id: self.bot.send_document(
+                        chat_id=chat_id, document=message.document.file_id,
+                        caption=caption, message_thread_id=thread_id,
+                        reply_to_message_id=reply_to_message_id, parse_mode='HTML',
+                        disable_notification=silent),
+                    chat_id, thread_id, msg_caption, reply_id, silent)
             case "audio":
-                caption, extras = split_caption(msg_caption)
-                sent = [self.bot.send_audio(chat_id=chat_id, audio=message.audio.file_id,
-                                            caption=caption, message_thread_id=thread_id,
-                                            reply_to_message_id=reply_id, parse_mode='HTML',
-                                            disable_notification=silent)]
-                sent.extend(self._send_caption_followups(chat_id, thread_id, extras, silent))
-                return sent
+                return self._send_media_with_caption(
+                    lambda caption, reply_to_message_id: self.bot.send_audio(
+                        chat_id=chat_id, audio=message.audio.file_id,
+                        caption=caption, message_thread_id=thread_id,
+                        reply_to_message_id=reply_to_message_id, parse_mode='HTML',
+                        disable_notification=silent),
+                    chat_id, thread_id, msg_caption, reply_id, silent)
             case "voice":
-                caption, extras = split_caption(msg_caption)
-                sent = [self.bot.send_voice(chat_id=chat_id, voice=message.voice.file_id,
-                                            caption=caption, message_thread_id=thread_id,
-                                            reply_to_message_id=reply_id, parse_mode='HTML',
-                                            disable_notification=silent)]
-                sent.extend(self._send_caption_followups(chat_id, thread_id, extras, silent))
-                return sent
+                return self._send_media_with_caption(
+                    lambda caption, reply_to_message_id: self.bot.send_voice(
+                        chat_id=chat_id, voice=message.voice.file_id,
+                        caption=caption, message_thread_id=thread_id,
+                        reply_to_message_id=reply_to_message_id, parse_mode='HTML',
+                        disable_notification=silent),
+                    chat_id, thread_id, msg_caption, reply_id, silent)
             case "animation":
-                caption, extras = split_caption(msg_caption)
-                sent = [self.bot.send_animation(chat_id=chat_id, animation=message.animation.file_id,
-                                                caption=caption, message_thread_id=thread_id,
-                                                reply_to_message_id=reply_id, parse_mode='HTML',
-                                                disable_notification=silent)]
-                sent.extend(self._send_caption_followups(chat_id, thread_id, extras, silent))
-                return sent
+                return self._send_media_with_caption(
+                    lambda caption, reply_to_message_id: self.bot.send_animation(
+                        chat_id=chat_id, animation=message.animation.file_id,
+                        caption=caption, message_thread_id=thread_id,
+                        reply_to_message_id=reply_to_message_id, parse_mode='HTML',
+                        disable_notification=silent),
+                    chat_id, thread_id, msg_caption, reply_id, silent)
             case "contact":
                 return [self.bot.send_contact(chat_id=chat_id,
                                               phone_number=message.contact.phone_number,
