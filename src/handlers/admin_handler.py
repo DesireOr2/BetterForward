@@ -12,6 +12,8 @@ from telebot.apihelper import ApiTelegramException
 from telebot.types import Message
 
 from src.config import logger, _
+from src.utils.auto_response import looks_like_regex
+from src.version import VERSION
 from src.utils.permissions import (
     DEFAULT_RESTRICTED_REPLY_MESSAGE,
     DISABLE,
@@ -41,9 +43,34 @@ class AdminHandler:
         tz_str = self.cache.get("setting_time_zone")
         self.time_zone = pytz.timezone(tz_str) if tz_str else pytz.UTC
 
+    OPERATOR_CACHE_KEY = "admin_operator_id"
+
     def check_valid_chat(self, message: Message) -> bool:
         """Check if message is in valid chat context."""
         return message.chat.id == self.group_id and message.message_thread_id is None
+
+    def set_operator(self, user_id: int):
+        """Remember which admin started the current multi-step admin flow."""
+        self.cache.set(self.OPERATOR_CACHE_KEY, int(user_id), 600)
+
+    def _is_group_admin(self, user_id: int) -> bool:
+        try:
+            return self.bot.get_chat_member(self.group_id, user_id).status in ("administrator", "creator")
+        except Exception:
+            return False
+
+    def _accept_admin_step(self, message: Message, next_handler) -> bool:
+        """Accept next-step input only from the active admin operator."""
+        if not self.check_valid_chat(message):
+            return False
+        operator_id = self.cache.get(self.OPERATOR_CACHE_KEY)
+        if operator_id is not None and message.from_user.id != operator_id:
+            self.bot.register_next_step_handler(message, next_handler)
+            return False
+        if not self._is_group_admin(message.from_user.id):
+            self.bot.register_next_step_handler(message, next_handler)
+            return False
+        return True
 
     def update_time_zone(self):
         """Update the timezone from cache and propagate to auto_response_manager."""
@@ -58,6 +85,11 @@ class AdminHandler:
         """Display the main admin menu."""
         if not self.check_valid_chat(message):
             return
+        # When opened from /help, require admin; callback path already authenticated.
+        if not edit and not self._is_group_admin(message.from_user.id):
+            return
+        if not edit:
+            self.set_operator(message.from_user.id)
 
         markup = types.InlineKeyboardMarkup()
         buttons = [
@@ -82,7 +114,9 @@ class AdminHandler:
             types.InlineKeyboardButton("📢" + _("Broadcast Message"),
                                        callback_data=json.dumps({"action": "broadcast_message"})),
             types.InlineKeyboardButton("📡" + _("Show Host IP Info"),
-                                       callback_data=json.dumps({"action": "show_host_ip"}))
+                                       callback_data=json.dumps({"action": "show_host_ip"})),
+            types.InlineKeyboardButton("🏷️" + _("Show Version"),
+                                       callback_data=json.dumps({"action": "show_version"}))
         ]
 
         for i in range(0, len(buttons), 2):
@@ -242,6 +276,8 @@ class AdminHandler:
 
     def process_permission_reply_message(self, message: Message):
         """Process permission restriction reply message editing."""
+        if not self._accept_admin_step(message, self.process_permission_reply_message):
+            return
         if not self.check_valid_chat(message):
             logger.warning(
                 f"Permission reply edit from wrong context: chat_id={message.chat.id}, thread_id={message.message_thread_id}")
@@ -312,7 +348,7 @@ class AdminHandler:
 
     def add_auto_response_type(self, message: Message):
         """Process the trigger pattern for auto response."""
-        if not self.check_valid_chat(message):
+        if not self._accept_admin_step(message, self.add_auto_response_type):
             return
         if isinstance(message.text, str) and message.text.startswith("/cancel"):
             self.bot.send_message(self.group_id, _("Operation cancelled"))
@@ -322,12 +358,8 @@ class AdminHandler:
             return
 
         self.cache.set("auto_response_key", message.text, 300)
-        try:
-            re.compile(message.text)
-            is_regex = True
-        except re.error:
-            is_regex = False
-        self.cache.set("auto_response_regex", is_regex, 300)
+        # Plain keywords stay exact matches; only metacharacter patterns become regex.
+        self.cache.set("auto_response_regex", looks_like_regex(message.text), 300)
         self.add_auto_response_value(message)
 
     def add_auto_response_value(self, message: Message):
@@ -360,7 +392,7 @@ class AdminHandler:
 
     def add_auto_response_time(self, message: Message):
         """Get time restrictions for auto response."""
-        if not self.check_valid_chat(message):
+        if not self._accept_admin_step(message, self.add_auto_response_time):
             return
         if isinstance(message.text, str) and message.text.startswith("/cancel"):
             self.bot.send_message(self.group_id, _("Operation cancelled"))
@@ -418,7 +450,7 @@ class AdminHandler:
 
     def set_auto_response_start_time(self, message: Message):
         """Set the start time for auto response."""
-        if not self.check_valid_chat(message):
+        if not self._accept_admin_step(message, self.set_auto_response_start_time):
             return
         try:
             start_time = datetime.strptime(message.text, "%H:%M").time()
@@ -434,7 +466,7 @@ class AdminHandler:
 
     def set_auto_response_end_time(self, message: Message):
         """Set the end time for auto response."""
-        if not self.check_valid_chat(message):
+        if not self._accept_admin_step(message, self.set_auto_response_end_time):
             return
         try:
             end_time = datetime.strptime(message.text, "%H:%M").time()
@@ -706,6 +738,8 @@ class AdminHandler:
 
     def edit_default_msg_handle(self, message: Message):
         """Handle default message editing."""
+        if not self._accept_admin_step(message, self.edit_default_msg_handle):
+            return
         if not isinstance(message.text, str):
             self.bot.send_message(self.group_id, _("Invalid input"))
             return
@@ -822,7 +856,7 @@ class AdminHandler:
 
     def process_tguard_api_url(self, message: Message):
         """Process TGuard API URL setting."""
-        if not self.check_valid_chat(message):
+        if not self._accept_admin_step(message, self.process_tguard_api_url):
             return
         if isinstance(message.text, str) and message.text.startswith("/cancel"):
             self.bot.send_message(self.group_id, _("Operation cancelled"))
@@ -858,7 +892,7 @@ class AdminHandler:
 
     def process_tguard_api_key(self, message: Message):
         """Process TGuard API Key setting."""
-        if not self.check_valid_chat(message):
+        if not self._accept_admin_step(message, self.process_tguard_api_key):
             return
         if isinstance(message.text, str) and message.text.startswith("/cancel"):
             self.bot.send_message(self.group_id, _("Operation cancelled"))
@@ -896,6 +930,8 @@ class AdminHandler:
 
     def validate_time_zone(self, message: Message):
         """Validate and set time zone."""
+        if not self._accept_admin_step(message, self.validate_time_zone):
+            return
         time_zone = message.text
         if (not isinstance(message.text, str)) or message.text.startswith("/cancel"):
             self.bot.send_message(self.group_id, _("Operation cancelled"))
@@ -967,6 +1003,7 @@ class AdminHandler:
         markup.add(types.InlineKeyboardButton("⬅️" + _("Back"),
                                                 callback_data=json.dumps({"action": "menu"})))
         self.bot.send_message(text=_("Host IP Information") + "\n\n" +
+                                _("Version: {}").format(VERSION) + "\n" +
                                 _("IP Address: {}").format(ip) + "\n" +
                                 _("Country: {}").format(country) + "\n" +
                                 _("City: {}").format(city),
@@ -974,8 +1011,24 @@ class AdminHandler:
                                 message_thread_id=None,
                                 reply_markup=markup)
 
+    def show_version(self, message: Message):
+        """Show the embedded application version."""
+        if not self.check_valid_chat(message):
+            return
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("⬅️" + _("Back"),
+                                              callback_data=json.dumps({"action": "menu"})))
+        self.bot.send_message(
+            text=_("Version Information") + "\n\n" + _("Version: {}").format(VERSION),
+            chat_id=message.chat.id,
+            message_thread_id=None,
+            reply_markup=markup,
+        )
+
     def handle_broadcast_message(self, message: Message):
         """Handle broadcast message content."""
+        if not self._accept_admin_step(message, self.handle_broadcast_message):
+            return
         if (isinstance(message.text, str) and message.text.startswith("/cancel")) or \
                 not self.check_valid_chat(message):
             self.bot.send_message(self.group_id, _("Operation cancelled"))
@@ -1103,6 +1156,8 @@ class AdminHandler:
 
     def process_add_spam_keyword(self, message: Message):
         """Process adding a spam keyword."""
+        if not self._accept_admin_step(message, self.process_add_spam_keyword):
+            return
         # Must be in the correct group and main topic
         if not self.check_valid_chat(message):
             logger.warning(
@@ -1347,6 +1402,8 @@ class AdminHandler:
 
     def process_edit_blocked_reply_message(self, message: Message):
         """Process blocked user reply message editing."""
+        if not self._accept_admin_step(message, self.process_edit_blocked_reply_message):
+            return
         if not self.check_valid_chat(message):
             logger.warning(
                 f"Blocked reply edit from wrong context: chat_id={message.chat.id}, thread_id={message.message_thread_id}")

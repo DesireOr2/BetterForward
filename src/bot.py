@@ -85,7 +85,8 @@ class TGBot:
         )
         self.callback_handler = CallbackHandler(
             self.bot, self.group_id, self.admin_handler,
-            self.command_handler, self.captcha_manager
+            self.command_handler, self.captcha_manager,
+            db_path=db_path,
         )
 
         # Register handlers
@@ -108,7 +109,8 @@ class TGBot:
 
         logger.info(_("Message queue initialized with {} workers").format(self.num_workers))
 
-        # Start polling
+    def run(self):
+        """Start long-polling. Separated from __init__ for clean shutdown."""
         self.bot.infinity_polling(
             skip_pending=True,
             timeout=5,

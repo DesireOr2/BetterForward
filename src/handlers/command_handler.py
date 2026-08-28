@@ -75,6 +75,8 @@ class CommandHandler:
     def help_command(self, message: Message, menu_callback):
         """Handle /help and /start commands."""
         if self.check_valid_chat(message):
+            if not self._is_group_admin(message.from_user.id):
+                return
             menu_callback(message)
         else:
             default_message = self._get_setting('default_message')
@@ -110,8 +112,8 @@ class CommandHandler:
                     "INSERT OR REPLACE INTO blocked_users (user_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
                     (user_id, None, None, None)  # Will be updated when user sends next message
                 )
-                # Remove user from verified list
-                db_cursor.execute("DELETE FROM verified_users WHERE user_id = ?", (user_id,))
+                # Remove user from verified list (DB + cache)
+                self.captcha_manager.remove_user_verification(user_id, db)
                 db.commit()
             else:
                 self.bot.send_message(self.group_id, _("User not found"),
@@ -131,9 +133,10 @@ class CommandHandler:
         close_forum_topic(chat_id=self.group_id, message_thread_id=message.message_thread_id,
                           token=self.bot.token)
 
-    def unban_user(self, message: Message, user_id: int = None):
+    def unban_user(self, message: Message, user_id: int = None, operator_id: int = None):
         """Unban a user."""
-        if message.chat.id != self.group_id or not self._is_group_admin(message.from_user.id):
+        actor_id = operator_id if operator_id is not None else message.from_user.id
+        if message.chat.id != self.group_id or not self._is_group_admin(actor_id):
             return
 
         if user_id is None:
@@ -143,7 +146,13 @@ class CommandHandler:
                                                "Correct usage:```\n"
                                                "/unban <user ID>```", parse_mode="Markdown")
                     return
-                user_id = int(msg_split[1])
+                try:
+                    user_id = int(msg_split[1])
+                except ValueError:
+                    self.bot.reply_to(message, "Invalid command\n"
+                                               "Correct usage:```\n"
+                                               "/unban <user ID>```", parse_mode="Markdown")
+                    return
 
         if user_id is None:
             with sqlite3.connect(self.db_path) as db:
@@ -156,6 +165,10 @@ class CommandHandler:
                     # Remove from blocked_users table
                     db_cursor.execute("DELETE FROM blocked_users WHERE user_id = ?", (user_id,))
                     db.commit()
+                else:
+                    self.bot.send_message(self.group_id, _("User not found"),
+                                          message_thread_id=message.message_thread_id)
+                    return
             self.bot.send_message(self.group_id, _("User unbanned"),
                                   message_thread_id=message.message_thread_id)
             try:
@@ -270,7 +283,7 @@ class CommandHandler:
                               reply_markup=markup)
 
     def delete_message(self, message: Message):
-        """Delete a forwarded message."""
+        """Delete a forwarded message (all split chunks when present)."""
         if self.check_valid_chat(message):
             return
         if message.reply_to_message is None:
@@ -278,26 +291,32 @@ class CommandHandler:
             return
 
         msg_id = message.reply_to_message.message_id
+        in_group = message.chat.id == self.group_id
         with sqlite3.connect(self.db_path) as db:
             db_cursor = db.cursor()
             db_cursor.execute(
-                "SELECT topic_id, forwarded_id FROM messages WHERE received_id = ? AND in_group = ? LIMIT 1",
-                (msg_id, message.chat.id == self.group_id))
-            if (result := db_cursor.fetchone()) is None:
+                "SELECT topic_id, forwarded_id FROM messages WHERE received_id = ? AND in_group = ?",
+                (msg_id, in_group))
+            rows = db_cursor.fetchall()
+            if not rows:
                 return
-            topic_id, forwarded_id = result
-            if message.chat.id == self.group_id:
+            topic_id = rows[0][0]
+            forwarded_ids = [row[1] for row in rows]
+            if in_group:
                 db_cursor.execute("SELECT user_id FROM topics WHERE thread_id = ? LIMIT 1", (topic_id,))
                 if (user_id := db_cursor.fetchone()) is None or user_id[0] is None:
                     return
-                self.bot.delete_message(chat_id=user_id[0], message_id=forwarded_id)
+                for forwarded_id in forwarded_ids:
+                    try:
+                        self.bot.delete_message(chat_id=user_id[0], message_id=forwarded_id)
+                    except ApiTelegramException:
+                        pass
             else:
                 self.bot.send_message(chat_id=self.group_id,
                                       text=_("[Alert]") + _("Message deleted by user"),
-                                      reply_to_message_id=forwarded_id)
-            # Delete the message from the database
+                                      reply_to_message_id=forwarded_ids[0])
             db_cursor.execute("DELETE FROM messages WHERE received_id = ? AND in_group = ?",
-                              (msg_id, message.chat.id == self.group_id))
+                              (msg_id, in_group))
             db.commit()
 
         # Delete the current message

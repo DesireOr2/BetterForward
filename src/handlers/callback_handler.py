@@ -1,21 +1,11 @@
 """Callback query handling module."""
 
 import json
+import sqlite3
 
 from telebot import types
 
 from src.config import logger, _
-
-
-PERMISSION_ADMIN_ACTIONS = {
-    "permission_settings",
-    "default_permissions",
-    "toggle_permission_default",
-    "permission_reply_settings",
-    "set_permission_reply_enabled",
-    "edit_permission_reply_message",
-    "reset_permission_reply_message",
-}
 
 
 class CallbackHandler:
@@ -44,47 +34,53 @@ class CallbackHandler:
             logger.error(_("Invalid JSON data received"))
             return
 
-        self.bot.answer_callback_query(call.id)
-
-        # User end callbacks
+        # User end callbacks (answer inside after auth checks)
         if action == "verify_button":
             self._handle_verify_button(call, data)
             return
 
         # Admin end callbacks
         if call.message.chat.id != self.group_id:
+            self.bot.answer_callback_query(call.id)
             return
 
-        self._handle_admin_callback(call, action, data)
-
-    def _handle_verify_button(self, call: types.CallbackQuery, data: dict):
-        """Handle button captcha verification."""
-        user_id = data.get("user_id")
-        if user_id:
-            import sqlite3
-            db_path = "./data/storage.db"
-            with sqlite3.connect(db_path) as db:
-                self.captcha_manager.set_user_verified(user_id, db)
-            self.bot.answer_callback_query(call.id)
-            self.bot.send_message(user_id, _("Verification successful, you can now send messages"))
-            self.bot.delete_message(call.message.chat.id, call.message.message_id)
-        else:
-            self.bot.answer_callback_query(call.id)
-            self.bot.send_message(call.message.chat.id, _("Invalid user ID"))
-
-    def _handle_admin_callback(self, call: types.CallbackQuery, action: str, data: dict):
-        """Handle admin callbacks."""
-        markup = types.InlineKeyboardMarkup()
-        back_button = types.InlineKeyboardButton("⬅️" + _("Back"),
-                                                 callback_data=json.dumps({"action": "menu"}))
-
-        if action in PERMISSION_ADMIN_ACTIONS and not self._is_group_admin(call.from_user.id):
+        if not self._is_group_admin(call.from_user.id):
             self.bot.answer_callback_query(
                 call.id,
                 _("This action is only available to admin users."),
                 show_alert=True,
             )
             return
+
+        self.bot.answer_callback_query(call.id)
+        self.admin_handler.set_operator(call.from_user.id)
+        self._handle_admin_callback(call, action, data)
+
+    def _handle_verify_button(self, call: types.CallbackQuery, data: dict):
+        """Handle button captcha verification."""
+        user_id = data.get("user_id")
+        if not user_id:
+            self.bot.answer_callback_query(call.id, _("Invalid user ID"), show_alert=True)
+            return
+        if call.from_user.id != user_id:
+            self.bot.answer_callback_query(
+                call.id,
+                _("This verification is not for you."),
+                show_alert=True,
+            )
+            return
+
+        with sqlite3.connect(self.db_path) as db:
+            self.captcha_manager.set_user_verified(user_id, db)
+        self.bot.answer_callback_query(call.id)
+        self.bot.send_message(user_id, _("Verification successful, you can now send messages"))
+        self.bot.delete_message(call.message.chat.id, call.message.message_id)
+
+    def _handle_admin_callback(self, call: types.CallbackQuery, action: str, data: dict):
+        """Handle admin callbacks."""
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("⬅️" + _("Back"),
+                                              callback_data=json.dumps({"action": "menu"})))
 
         match action:
             case "menu":
@@ -140,7 +136,8 @@ class CallbackHandler:
                     self.bot.delete_message(self.group_id, call.message.message_id)
                     self.bot.send_message(self.group_id, _("Invalid action"), reply_markup=markup)
                     return
-                self.command_handler.unban_user(call.message, user_id=data["id"])
+                self.command_handler.unban_user(
+                    call.message, user_id=data["id"], operator_id=call.from_user.id)
             case "select_ban_user":
                 if "id" not in data:
                     self.bot.delete_message(self.group_id, call.message.message_id)
@@ -232,6 +229,8 @@ class CallbackHandler:
                 self.admin_handler.confirm_reset_spam_topic(call.message)
             case "show_host_ip":
                 self.admin_handler.show_host_ip(call.message)
+            case "show_version":
+                self.admin_handler.show_version(call.message)
             case _:
                 logger.error(_("Invalid action received") + action)
 
